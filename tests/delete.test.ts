@@ -38,9 +38,7 @@ describe("Delete operations", () => {
 
     delete store.root.a;
 
-    expect(callback).toHaveBeenCalledWith([
-      { type: "property", path: "a", value: undefined },
-    ]);
+    expect(callback).toHaveBeenCalledWith([{ type: "property", path: "a", value: undefined }]);
   });
 
   it("should not notify when deleting a non-existent property", () => {
