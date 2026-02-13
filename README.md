@@ -95,12 +95,12 @@ store.trigger(root => root.cart.items);
 
 ### Change Tracking
 
-Subscribe to all changes with path and old/new values:
+Subscribe to all changes with path and new values:
 
 ```typescript
 store.subscribeToChanges(changes => {
   for (const change of changes) {
-    if (change.type === 'set') {
+    if (change.type === 'property') {
       console.log(`${change.path} = ${change.value}`);
     } else {
       console.log(`${change.path}.${change.method}(${change.args.join(', ')})`);
@@ -147,7 +147,7 @@ unsubscribe();
 
 ## Collection Tracking
 
-Arrays, Maps, and Sets are automatically tracked. Mutating methods trigger subscribers and emit changes.
+Arrays are automatically tracked. Mutating methods trigger subscribers and emit changes.
 
 ```typescript
 const store = createStore<AppState>({ cart: { items: [] } });
