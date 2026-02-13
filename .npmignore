@@ -1,0 +1,19 @@
+# Source
+src
+tests
+
+# Config
+tsconfig.json
+tsdown.config.ts
+vitest.config.ts
+.gitignore
+
+# Coverage
+coverage
+
+# IDE
+.idea
+.vscode
+
+# OS
+.DS_Store
