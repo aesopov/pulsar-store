@@ -120,39 +120,95 @@ export function createStore<T extends object>(initialValue?: Partial<T>): Store<
   // Mutating methods for arrays
   const arrayMutators = new Set(["push", "pop", "shift", "unshift", "splice", "sort", "reverse", "fill", "copyWithin"]);
 
+  // Cache proxies by target object for referential stability
+  const proxyCache = new WeakMap<object, WeakRef<object>>();
+
+  function getCachedProxy<U extends object>(target: U, factory: () => U): U {
+    const ref = proxyCache.get(target);
+    if (ref) {
+      const cached = ref.deref();
+      if (cached) return cached as U;
+    }
+    const proxy = factory();
+    proxyCache.set(target, new WeakRef(proxy));
+    return proxy;
+  }
+
   function createArrayProxy<C extends unknown[]>(collection: C, currentPath: Path): C {
-    return new Proxy(collection, {
-      get(obj, prop) {
-        const value = Reflect.get(obj, prop);
+    return getCachedProxy(
+      collection,
+      () =>
+        new Proxy(collection, {
+          get(obj, prop) {
+            const value = Reflect.get(obj, prop);
 
-        if (typeof value !== "function") {
-          if (value !== null && typeof value === "object") {
-            return createWriteProxy(value as object, [...currentPath, prop]);
-          }
-          return value;
-        }
-
-        // Check if this is a mutating method
-        const propStr = String(prop);
-        if (arrayMutators.has(propStr)) {
-          return function (this: C, ...args: unknown[]) {
-            const pathStr = pathToString(currentPath);
-
-            // Validate args are serializable
-            for (let i = 0; i < args.length; i++) {
-              assertSerializable(args[i], `${pathStr}.${propStr}(arg${i})`);
+            if (typeof value !== "function") {
+              if (value !== null && typeof value === "object") {
+                return createWriteProxy(value as object, [...currentPath, prop]);
+              }
+              return value;
             }
 
-            // Capture state for rollback
-            const oldArray = [...obj];
+            // Check if this is a mutating method
+            const propStr = String(prop);
+            if (arrayMutators.has(propStr)) {
+              return function (this: C, ...args: unknown[]) {
+                const pathStr = pathToString(currentPath);
 
-            const result = (value as Function).apply(obj, args);
+                // Validate args are serializable
+                for (let i = 0; i < args.length; i++) {
+                  assertSerializable(args[i], `${pathStr}.${propStr}(arg${i})`);
+                }
 
-            const change: ArrayChange = {
-              type: "array",
+                // Capture state for rollback
+                const oldArray = [...obj];
+
+                const result = (value as Function).apply(obj, args);
+
+                const change: ArrayChange = {
+                  type: "array",
+                  path: pathStr,
+                  method: propStr,
+                  args: args,
+                };
+
+                if (isInTransaction) {
+                  changedPathsDuringTransaction.add(pathStr);
+                  changesDuringTransaction.push(change);
+                } else {
+                  try {
+                    notifyChangeSubscribers([change]);
+                    notifySubscribers(new Set([pathStr]));
+                  } catch (e) {
+                    // Rollback array to previous state
+                    obj.length = 0;
+                    obj.push(...oldArray);
+                    throw e;
+                  }
+                }
+
+                return result;
+              };
+            }
+
+            // Non-mutating methods need proper binding
+            return (value as Function).bind(obj);
+          },
+
+          set(obj, prop, value) {
+            const newPath = [...currentPath, prop];
+            const pathStr = pathToString(newPath);
+
+            assertSerializable(value, pathStr);
+
+            const oldValue = Reflect.get(obj, prop);
+
+            Reflect.set(obj, prop, value);
+
+            const change: PropertyChange = {
+              type: "property",
               path: pathStr,
-              method: propStr,
-              args: args,
+              value,
             };
 
             if (isInTransaction) {
@@ -163,81 +219,43 @@ export function createStore<T extends object>(initialValue?: Partial<T>): Store<
                 notifyChangeSubscribers([change]);
                 notifySubscribers(new Set([pathStr]));
               } catch (e) {
-                // Rollback array to previous state
-                obj.length = 0;
-                obj.push(...oldArray);
+                // Rollback
+                Reflect.set(obj, prop, oldValue);
                 throw e;
               }
             }
 
-            return result;
-          };
-        }
+            return true;
+          },
 
-        // Non-mutating methods need proper binding
-        return (value as Function).bind(obj);
-      },
+          deleteProperty(obj, prop) {
+            if (!(prop in obj)) return true;
 
-      set(obj, prop, value) {
-        const newPath = [...currentPath, prop];
-        const pathStr = pathToString(newPath);
+            const newPath = [...currentPath, prop];
+            const pathStr = pathToString(newPath);
+            const oldValue = Reflect.get(obj, prop);
 
-        assertSerializable(value, pathStr);
+            Reflect.deleteProperty(obj, prop);
 
-        const oldValue = Reflect.get(obj, prop);
+            const change: PropertyChange = { type: "property", path: pathStr, value: undefined };
 
-        Reflect.set(obj, prop, value);
+            if (isInTransaction) {
+              changedPathsDuringTransaction.add(pathStr);
+              changesDuringTransaction.push(change);
+            } else {
+              try {
+                notifyChangeSubscribers([change]);
+                notifySubscribers(new Set([pathStr]));
+              } catch (e) {
+                Reflect.set(obj, prop, oldValue);
+                throw e;
+              }
+            }
 
-        const change: PropertyChange = {
-          type: "property",
-          path: pathStr,
-          value,
-        };
-
-        if (isInTransaction) {
-          changedPathsDuringTransaction.add(pathStr);
-          changesDuringTransaction.push(change);
-        } else {
-          try {
-            notifyChangeSubscribers([change]);
-            notifySubscribers(new Set([pathStr]));
-          } catch (e) {
-            // Rollback
-            Reflect.set(obj, prop, oldValue);
-            throw e;
-          }
-        }
-
-        return true;
-      },
-
-      deleteProperty(obj, prop) {
-        if (!(prop in obj)) return true;
-
-        const newPath = [...currentPath, prop];
-        const pathStr = pathToString(newPath);
-        const oldValue = Reflect.get(obj, prop);
-
-        Reflect.deleteProperty(obj, prop);
-
-        const change: PropertyChange = { type: "property", path: pathStr, value: undefined };
-
-        if (isInTransaction) {
-          changedPathsDuringTransaction.add(pathStr);
-          changesDuringTransaction.push(change);
-        } else {
-          try {
-            notifyChangeSubscribers([change]);
-            notifySubscribers(new Set([pathStr]));
-          } catch (e) {
-            Reflect.set(obj, prop, oldValue);
-            throw e;
-          }
-        }
-
-        return true;
-      },
-    });
+            return true;
+          },
+        }),
+    );
   }
 
   function createTrackingProxy<U extends object>(target: U, paths: Set<string>, currentPath: Path): U {
@@ -369,85 +387,89 @@ export function createStore<T extends object>(initialValue?: Partial<T>): Store<
   }
 
   function createWriteProxy<U extends object>(target: U, currentPath: Path): U {
-    return new Proxy(target, {
-      get(obj, prop) {
-        if (prop === Symbol.toStringTag || prop === Symbol.toPrimitive) {
-          return undefined;
-        }
+    return getCachedProxy(
+      target,
+      () =>
+        new Proxy(target, {
+          get(obj, prop) {
+            if (prop === Symbol.toStringTag || prop === Symbol.toPrimitive) {
+              return undefined;
+            }
 
-        const value: unknown = Reflect.get(obj, prop);
+            const value: unknown = Reflect.get(obj, prop);
 
-        if (value !== null && typeof value === "object") {
-          const newPath = [...currentPath, prop];
-          // Use array proxy for Arrays
-          if (Array.isArray(value)) {
-            return createArrayProxy(value, newPath);
-          }
-          return createWriteProxy(value as object, newPath);
-        }
-        return value;
-      },
+            if (value !== null && typeof value === "object") {
+              const newPath = [...currentPath, prop];
+              // Use array proxy for Arrays
+              if (Array.isArray(value)) {
+                return createArrayProxy(value, newPath);
+              }
+              return createWriteProxy(value as object, newPath);
+            }
+            return value;
+          },
 
-      set(obj, prop, value) {
-        const newPath = [...currentPath, prop];
-        const pathStr = pathToString(newPath);
+          set(obj, prop, value) {
+            const newPath = [...currentPath, prop];
+            const pathStr = pathToString(newPath);
 
-        assertSerializable(value, pathStr);
+            assertSerializable(value, pathStr);
 
-        const oldValue = Reflect.get(obj, prop);
+            const oldValue = Reflect.get(obj, prop);
 
-        Reflect.set(obj, prop, value);
+            Reflect.set(obj, prop, value);
 
-        const change: PropertyChange = {
-          type: "property",
-          path: pathStr,
-          value,
-        };
+            const change: PropertyChange = {
+              type: "property",
+              path: pathStr,
+              value,
+            };
 
-        if (isInTransaction) {
-          changesDuringTransaction.push(change);
-          changedPathsDuringTransaction.add(pathStr);
-        } else {
-          try {
-            notifyChangeSubscribers([change]);
-            notifySubscribers(new Set([pathStr]));
-          } catch (e) {
-            // Rollback
-            Reflect.set(obj, prop, oldValue);
-            throw e;
-          }
-        }
+            if (isInTransaction) {
+              changesDuringTransaction.push(change);
+              changedPathsDuringTransaction.add(pathStr);
+            } else {
+              try {
+                notifyChangeSubscribers([change]);
+                notifySubscribers(new Set([pathStr]));
+              } catch (e) {
+                // Rollback
+                Reflect.set(obj, prop, oldValue);
+                throw e;
+              }
+            }
 
-        return true;
-      },
+            return true;
+          },
 
-      deleteProperty(obj, prop) {
-        if (!(prop in obj)) return true;
+          deleteProperty(obj, prop) {
+            if (!(prop in obj)) return true;
 
-        const newPath = [...currentPath, prop];
-        const pathStr = pathToString(newPath);
-        const oldValue = Reflect.get(obj, prop);
+            const newPath = [...currentPath, prop];
+            const pathStr = pathToString(newPath);
+            const oldValue = Reflect.get(obj, prop);
 
-        Reflect.deleteProperty(obj, prop);
+            Reflect.deleteProperty(obj, prop);
 
-        const change: PropertyChange = { type: "property", path: pathStr, value: undefined };
+            const change: PropertyChange = { type: "property", path: pathStr, value: undefined };
 
-        if (isInTransaction) {
-          changesDuringTransaction.push(change);
-          changedPathsDuringTransaction.add(pathStr);
-        } else {
-          try {
-            notifyChangeSubscribers([change]);
-            notifySubscribers(new Set([pathStr]));
-          } catch (e) {
-            Reflect.set(obj, prop, oldValue);
-            throw e;
-          }
-        }
+            if (isInTransaction) {
+              changesDuringTransaction.push(change);
+              changedPathsDuringTransaction.add(pathStr);
+            } else {
+              try {
+                notifyChangeSubscribers([change]);
+                notifySubscribers(new Set([pathStr]));
+              } catch (e) {
+                Reflect.set(obj, prop, oldValue);
+                throw e;
+              }
+            }
 
-        return true;
-      },
-    });
+            return true;
+          },
+        }),
+    );
   }
 
   const rootProxy = createWriteProxy(data, []);
