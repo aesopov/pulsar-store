@@ -1,6 +1,6 @@
 {
   "name": "pulsar-store",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Lightweight TypeScript reactive store with automatic dependency tracking",
   "main": "dist/index.cjs",
   "module": "dist/index.mjs",
