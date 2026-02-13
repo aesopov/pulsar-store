@@ -78,6 +78,7 @@ interface Subscription<T, R> {
 
 interface Store<T> {
   root: T;
+  snapshot(): T;
   subscribe<R>(selector: (root: T) => R, callback: (value: R) => void): () => void;
   subscribeToChanges(callback: (changes: Change[]) => void): () => void;
   apply(fn: (root: T) => void): void;
@@ -202,6 +203,33 @@ export function createStore<T extends object>(initialValue?: Partial<T>): Store<
             notifySubscribers(new Set([pathStr]));
           } catch (e) {
             // Rollback
+            Reflect.set(obj, prop, oldValue);
+            throw e;
+          }
+        }
+
+        return true;
+      },
+
+      deleteProperty(obj, prop) {
+        if (!(prop in obj)) return true;
+
+        const newPath = [...currentPath, prop];
+        const pathStr = pathToString(newPath);
+        const oldValue = Reflect.get(obj, prop);
+
+        Reflect.deleteProperty(obj, prop);
+
+        const change: PropertyChange = { type: "property", path: pathStr, value: undefined };
+
+        if (isInTransaction) {
+          changedPathsDuringTransaction.add(pathStr);
+          changesDuringTransaction.push(change);
+        } else {
+          try {
+            notifyChangeSubscribers([change]);
+            notifySubscribers(new Set([pathStr]));
+          } catch (e) {
             Reflect.set(obj, prop, oldValue);
             throw e;
           }
@@ -392,6 +420,33 @@ export function createStore<T extends object>(initialValue?: Partial<T>): Store<
 
         return true;
       },
+
+      deleteProperty(obj, prop) {
+        if (!(prop in obj)) return true;
+
+        const newPath = [...currentPath, prop];
+        const pathStr = pathToString(newPath);
+        const oldValue = Reflect.get(obj, prop);
+
+        Reflect.deleteProperty(obj, prop);
+
+        const change: PropertyChange = { type: "property", path: pathStr, value: undefined };
+
+        if (isInTransaction) {
+          changesDuringTransaction.push(change);
+          changedPathsDuringTransaction.add(pathStr);
+        } else {
+          try {
+            notifyChangeSubscribers([change]);
+            notifySubscribers(new Set([pathStr]));
+          } catch (e) {
+            Reflect.set(obj, prop, oldValue);
+            throw e;
+          }
+        }
+
+        return true;
+      },
     });
   }
 
@@ -400,6 +455,10 @@ export function createStore<T extends object>(initialValue?: Partial<T>): Store<
   return {
     get root(): T {
       return rootProxy;
+    },
+
+    snapshot(): T {
+      return JSON.parse(JSON.stringify(data));
     },
 
     subscribe<R>(selector: (root: T) => R, callback: (value: R) => void): () => void {
